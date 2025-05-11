@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, Camera, AlertTriangle, Hand, Plus, XIcon, Divide, Trash2, Eraser, ScanLine, Volume2 } from 'lucide-react';
+import { Loader2, Camera, AlertTriangle, Hand, Plus, XIcon, Divide, Trash2, Eraser, ScanLine, Volume2, TimerIcon } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useToast } from '@/hooks/use-toast';
 
@@ -16,6 +16,7 @@ type PermissionStatus = 'idle' | 'pending' | 'granted' | 'denied';
 
 const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
+const SCAN_COUNTDOWN_SECONDS = 3;
 
 interface AnimatedNumberProps {
   value: number | null;
@@ -45,6 +46,7 @@ export default function FingerCounterApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scanCountdown, setScanCountdown] = useState<number | null>(null);
 
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [selectedHistoryItemIds, setSelectedHistoryItemIds] = useState<string[]>([]);
@@ -52,6 +54,7 @@ export default function FingerCounterApp() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
 
   const requestCameraPermission = async () => {
@@ -82,16 +85,18 @@ export default function FingerCounterApp() {
 
   const speakNumber = (number: number) => {
     if (!('speechSynthesis' in window)) {
-      setError("Speech synthesis not supported by your browser.");
       toast({
-        variant: 'destructive',
-        title: 'Speech Synthesis Not Supported',
-        description: 'Your browser does not support text-to-speech.',
+        variant: 'default', // Changed from 'destructive'
+        title: 'Voice Announcement Unavailable',
+        description: 'Your browser does not support text-to-speech voice announcement.',
       });
+      // Not setting main error state for this non-critical feature
+      // setError("Speech synthesis not supported by your browser."); 
+      setIsSpeaking(false); // Ensure isSpeaking is false if not supported
       return;
     }
     
-    window.speechSynthesis.cancel();
+    window.speechSynthesis.cancel(); // Cancel any previous speech
 
     const utterance = new SpeechSynthesisUtterance(`Detected ${number} finger${number === 1 ? '' : 's'}`);
     utterance.lang = 'en-US'; 
@@ -103,11 +108,11 @@ export default function FingerCounterApp() {
     };
     utterance.onerror = (event) => {
       console.error('Speech synthesis error:', event.error);
-      setError(`Could not speak the number: ${event.error}`);
+      // setError(`Could not speak the number: ${event.error}`); // Avoid main error for this
       toast({
         variant: 'destructive',
         title: 'Speech Error',
-        description: `Could not speak the number: ${event.error}`,
+        description: `Could not announce the number: ${event.error}`,
       });
       setIsSpeaking(false);
     };
@@ -118,11 +123,13 @@ export default function FingerCounterApp() {
     if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended || videoRef.current.readyState < videoRef.current.HAVE_METADATA) {
       console.warn("Video stream is not available, not playing, or not ready for capture.");
       setError("Video stream is not available or not ready. Please ensure camera is active.");
+      setIsLoading(false); // Ensure loading is reset if we bail early
       return;
     }
-    if (isLoading || isSpeaking) { 
-        return;
-    }
+     // isLoading and isSpeaking checks moved to handleScanAndAnnounce initiation
+    // if (isLoading || isSpeaking) { 
+    //     return;
+    // }
 
     setIsLoading(true);
     const canvas = canvasRef.current;
@@ -179,20 +186,17 @@ export default function FingerCounterApp() {
       setError("Failed to get canvas context.");
     }
     setIsLoading(false);
-  }, [isLoading, isSpeaking, history, toast]);
+  }, [history, toast]); // Removed isLoading, isSpeaking from deps as they are handled before call
 
+  // Stream management effect
   useEffect(() => {
     const videoElement = videoRef.current;
-  
     if (videoElement) {
       if (stream) {
         if (videoElement.srcObject !== stream) {
           videoElement.srcObject = stream;
-          // `autoPlay` attribute and `onLoadedMetadata` handler on the <video> tag
-          // should handle playback.
         }
       } else {
-        // If stream becomes null, clear srcObject and stop tracks
         if (videoElement.srcObject) {
           const mediaStream = videoElement.srcObject as MediaStream;
           mediaStream.getTracks().forEach(track => track.stop());
@@ -200,20 +204,12 @@ export default function FingerCounterApp() {
         }
       }
     }
-  
-    // Cleanup function for this effect
     return () => {
-      // Stop tracks of the 'stream' instance this effect was dealing with.
-      // This runs when the component unmounts or 'stream' changes, before the effect runs again.
       stream?.getTracks().forEach(track => track.stop());
-  
-      if (window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-      }
     };
   }, [stream]);
   
-  
+  // Permission query and general cleanup effect
   useEffect(() => {
     if (typeof navigator !== "undefined" && navigator.permissions) {
       navigator.permissions.query({ name: 'camera' as PermissionName }).then(status => {
@@ -225,10 +221,45 @@ export default function FingerCounterApp() {
         }
       }).catch(e => console.warn("Permission API not fully supported or error:", e));
     }
+
+    return () => { // General cleanup on unmount
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+      }
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
   }, []);
 
+
   const handleScanAndAnnounce = () => {
-    captureFrameAndDetect();
+    if (isLoading || isSpeaking || scanCountdown !== null) {
+      return; // Prevent multiple triggers or scan during active states
+    }
+    setDetectedFingers(null); // Clear previous detection before new scan
+    setError(null);
+
+    if (countdownIntervalRef.current) { // Clear any existing interval
+      clearInterval(countdownIntervalRef.current);
+    }
+
+    setScanCountdown(SCAN_COUNTDOWN_SECONDS);
+
+    countdownIntervalRef.current = setInterval(() => {
+      setScanCountdown(prevCountdown => {
+        if (prevCountdown === null) { // Should not happen if interval is running correctly
+          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+          return null;
+        }
+        if (prevCountdown <= 1) {
+          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+          captureFrameAndDetect();
+          return null; // Reset countdown
+        }
+        return prevCountdown - 1;
+      });
+    }, 1000);
   };
 
   const handleToggleHistoryItemSelection = (id: string) => {
@@ -295,6 +326,24 @@ export default function FingerCounterApp() {
 
   const selectedValues = history.filter(item => selectedHistoryItemIds.includes(item.id)).map(item => item.value);
 
+  let scanButtonText = 'Scan and Announce';
+  let scanButtonIcon = <ScanLine className="mr-2 h-5 w-5" />;
+  let scanButtonDisabled = false;
+
+  if (scanCountdown !== null) {
+    scanButtonText = `Scanning in ${scanCountdown}...`;
+    scanButtonIcon = <TimerIcon className="mr-2 h-5 w-5 animate-pulse" />;
+    scanButtonDisabled = true;
+  } else if (isLoading) {
+    scanButtonText = 'Scanning...';
+    scanButtonIcon = <Loader2 className="mr-2 h-5 w-5 animate-spin" />;
+    scanButtonDisabled = true;
+  } else if (isSpeaking) {
+    scanButtonText = 'Speaking...';
+    scanButtonIcon = <Volume2 className="mr-2 h-5 w-5" />;
+    scanButtonDisabled = true;
+  }
+
 
   return (
     <Card className="w-full max-w-4xl shadow-2xl">
@@ -326,7 +375,7 @@ export default function FingerCounterApp() {
           </Alert>
         )}
         
-        {permissionStatus === 'denied' && !error && ( // Show this only if no other error is active
+        {permissionStatus === 'denied' && !error && ( 
            <Alert variant="destructive" className="w-full">
             <AlertTriangle className="h-5 w-5" />
             <AlertTitle>Permission Denied</AlertTitle>
@@ -343,17 +392,14 @@ export default function FingerCounterApp() {
                   className="w-full h-full object-cover transform scale-x-[-1]"
                   playsInline
                   muted
-                  autoPlay // autoPlay is crucial
+                  autoPlay
                   aria-label="Camera feed"
                   onLoadedMetadata={(e) => {
                     const video = e.currentTarget;
                     if (video.paused) {
                       video.play().catch(err => {
-                        // AbortError is fine, it means something else (like srcObject change) interrupted.
                         if (err.name !== 'AbortError') {
                           console.warn('Failed to play video onLoadedMetadata:', err);
-                           // Avoid setting a user-facing error here if autoPlay might still recover
-                           // or if it's a transient issue.
                         }
                       });
                     }
@@ -363,28 +409,23 @@ export default function FingerCounterApp() {
                     setError(`Video element error: ${videoRef.current?.error?.message || 'Unknown video error'}. Please ensure your camera is working and permissions are granted.`);
                   }}
                 />
-                {(isLoading || isSpeaking) && videoRef.current?.srcObject && (
+                {(isLoading || isSpeaking || scanCountdown !== null) && videoRef.current?.srcObject && (
                    <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
-                      {isLoading && <Loader2 className="h-12 w-12 text-white animate-spin" />}
-                      {isSpeaking && !isLoading && <Volume2 className="h-12 w-12 text-white" />}
+                      {scanCountdown !== null && <TimerIcon className="h-12 w-12 text-white animate-pulse" />}
+                      {isLoading && scanCountdown === null && <Loader2 className="h-12 w-12 text-white animate-spin" />}
+                      {isSpeaking && scanCountdown === null && !isLoading && <Volume2 className="h-12 w-12 text-white" />}
                    </div>
                 )}
               </div>
               <AnimatedNumberDisplay value={detectedFingers} />
               <Button
                 onClick={handleScanAndAnnounce}
-                disabled={isLoading || isSpeaking}
+                disabled={scanButtonDisabled || !stream} // Disable if no stream too
                 size="lg"
                 className="w-full max-w-xs mt-2"
               >
-                {isLoading ? (
-                  <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                ) : isSpeaking ? (
-                  <Volume2 className="mr-2 h-5 w-5" />
-                ) : (
-                  <ScanLine className="mr-2 h-5 w-5" />
-                )}
-                {isLoading ? 'Scanning...' : isSpeaking ? 'Speaking...' : 'Scan and Announce'}
+                {scanButtonIcon}
+                {scanButtonText}
               </Button>
             </div>
 
@@ -461,8 +502,9 @@ export default function FingerCounterApp() {
         )}
         <canvas ref={canvasRef} className="hidden" aria-hidden="true"></canvas>
       </CardContent>
-      <CardFooter className="text-xs text-muted-foreground justify-center">
-        AI-powered finger counting. Click "Scan and Announce" to detect and hear the result.
+      <CardFooter className="text-xs text-muted-foreground justify-center flex flex-col items-center space-y-1 pt-4">
+        <p>AI-powered finger counting. Click "Scan and Announce" to detect and hear the result.</p>
+        <p>&copy; 2025 Aashim Neupane. All rights reserved.</p>
       </CardFooter>
     </Card>
   );
