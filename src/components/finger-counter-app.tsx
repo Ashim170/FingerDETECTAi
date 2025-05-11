@@ -86,17 +86,15 @@ export default function FingerCounterApp() {
   const speakNumber = (number: number) => {
     if (!('speechSynthesis' in window)) {
       toast({
-        variant: 'default', // Changed from 'destructive'
+        variant: 'default',
         title: 'Voice Announcement Unavailable',
         description: 'Your browser does not support text-to-speech voice announcement.',
       });
-      // Not setting main error state for this non-critical feature
-      // setError("Speech synthesis not supported by your browser."); 
-      setIsSpeaking(false); // Ensure isSpeaking is false if not supported
+      setIsSpeaking(false); 
       return;
     }
     
-    window.speechSynthesis.cancel(); // Cancel any previous speech
+    window.speechSynthesis.cancel(); 
 
     const utterance = new SpeechSynthesisUtterance(`Detected ${number} finger${number === 1 ? '' : 's'}`);
     utterance.lang = 'en-US'; 
@@ -108,7 +106,6 @@ export default function FingerCounterApp() {
     };
     utterance.onerror = (event) => {
       console.error('Speech synthesis error:', event.error);
-      // setError(`Could not speak the number: ${event.error}`); // Avoid main error for this
       toast({
         variant: 'destructive',
         title: 'Speech Error',
@@ -123,13 +120,9 @@ export default function FingerCounterApp() {
     if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended || videoRef.current.readyState < videoRef.current.HAVE_METADATA) {
       console.warn("Video stream is not available, not playing, or not ready for capture.");
       setError("Video stream is not available or not ready. Please ensure camera is active.");
-      setIsLoading(false); // Ensure loading is reset if we bail early
+      setIsLoading(false); 
       return;
     }
-     // isLoading and isSpeaking checks moved to handleScanAndAnnounce initiation
-    // if (isLoading || isSpeaking) { 
-    //     return;
-    // }
 
     setIsLoading(true);
     const canvas = canvasRef.current;
@@ -186,7 +179,7 @@ export default function FingerCounterApp() {
       setError("Failed to get canvas context.");
     }
     setIsLoading(false);
-  }, [history, toast]); // Removed isLoading, isSpeaking from deps as they are handled before call
+  }, [history, toast]); 
 
   // Stream management effect
   useEffect(() => {
@@ -222,9 +215,10 @@ export default function FingerCounterApp() {
       }).catch(e => console.warn("Permission API not fully supported or error:", e));
     }
 
-    return () => { // General cleanup on unmount
+    return () => { 
       if (countdownIntervalRef.current) {
         clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
       }
       if (window.speechSynthesis) {
         window.speechSynthesis.cancel();
@@ -235,32 +229,44 @@ export default function FingerCounterApp() {
 
   const handleScanAndAnnounce = () => {
     if (isLoading || isSpeaking || scanCountdown !== null) {
-      return; // Prevent multiple triggers or scan during active states
+      return; 
     }
-    setDetectedFingers(null); // Clear previous detection before new scan
+    setDetectedFingers(null); 
     setError(null);
 
-    if (countdownIntervalRef.current) { // Clear any existing interval
+    if (countdownIntervalRef.current) { 
       clearInterval(countdownIntervalRef.current);
     }
 
     setScanCountdown(SCAN_COUNTDOWN_SECONDS);
 
     countdownIntervalRef.current = setInterval(() => {
-      setScanCountdown(prevCountdown => {
-        if (prevCountdown === null) { // Should not happen if interval is running correctly
-          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+      setScanCountdown(prev => {
+        if (prev === null) { // Countdown was reset or stopped
+          if(countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+          countdownIntervalRef.current = null;
           return null;
         }
-        if (prevCountdown <= 1) {
-          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
-          captureFrameAndDetect();
-          return null; // Reset countdown
+        if (prev <= 1) { // Will become 0 or less in the next step
+          return prev - 1; // Let it go to 0, useEffect will handle scan
         }
-        return prevCountdown - 1;
+        return prev - 1;
       });
     }, 1000);
   };
+
+  // Effect to trigger scan when countdown reaches zero
+  useEffect(() => {
+    if (scanCountdown === 0) {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+      captureFrameAndDetect();
+      setScanCountdown(null); // Reset countdown state
+    }
+  }, [scanCountdown, captureFrameAndDetect]);
+
 
   const handleToggleHistoryItemSelection = (id: string) => {
     setSelectedHistoryItemIds(prevSelected =>
@@ -420,7 +426,7 @@ export default function FingerCounterApp() {
               <AnimatedNumberDisplay value={detectedFingers} />
               <Button
                 onClick={handleScanAndAnnounce}
-                disabled={scanButtonDisabled || !stream} // Disable if no stream too
+                disabled={scanButtonDisabled || !stream} 
                 size="lg"
                 className="w-full max-w-xs mt-2"
               >
