@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Badge } from '@/components/ui/badge'; // Keep Badge if used elsewhere, or remove
 import { Loader2, Camera, AlertTriangle, Hand, Plus, XIcon, Divide, Trash2, Eraser, ScanLine, Volume2 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useToast } from '@/hooks/use-toast';
@@ -92,7 +91,6 @@ export default function FingerCounterApp() {
       return;
     }
     
-    // Cancel any ongoing speech before starting a new one
     window.speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(`Detected ${number} finger${number === 1 ? '' : 's'}`);
@@ -117,18 +115,16 @@ export default function FingerCounterApp() {
   };
 
   const captureFrameAndDetect = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended) {
-      setError("Video stream is not available or not playing.");
+    if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended || videoRef.current.readyState < videoRef.current.HAVE_METADATA) {
+      console.warn("Video stream is not available, not playing, or not ready for capture.");
+      setError("Video stream is not available or not ready. Please ensure camera is active.");
       return;
     }
-    if (isLoading || isSpeaking) { // Prevent new scan if already loading or speaking
+    if (isLoading || isSpeaking) { 
         return;
     }
 
     setIsLoading(true);
-    // Keep previous error if any, until new error or success
-    // setError(null); 
-
     const canvas = canvasRef.current;
     const video = videoRef.current;
     canvas.width = VIDEO_WIDTH;
@@ -136,7 +132,14 @@ export default function FingerCounterApp() {
     const context = canvas.getContext('2d');
 
     if (context) {
-      context.drawImage(video, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+      try {
+        context.drawImage(video, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+      } catch (drawError) {
+        console.error("Error drawing video to canvas:", drawError);
+        setError("Failed to capture frame for AI processing. Video stream might be corrupted or inaccessible.");
+        setIsLoading(false);
+        return;
+      }
       const photoDataUri = canvas.toDataURL('image/jpeg', 0.8);
       
       if (!photoDataUri || photoDataUri === "data:,") {
@@ -148,7 +151,7 @@ export default function FingerCounterApp() {
       try {
         const result = await detectNumberOfFingers({ photoDataUri });
         setDetectedFingers(result.numberOfFingers);
-        setError(null); // Clear error on successful detection
+        setError(null); 
 
         if (history.length === 0 || history[history.length - 1].value !== result.numberOfFingers) {
           setHistory(prevHistory => {
@@ -176,23 +179,40 @@ export default function FingerCounterApp() {
       setError("Failed to get canvas context.");
     }
     setIsLoading(false);
-  }, [isLoading, isSpeaking, history, toast]); // Added isSpeaking and toast to dependencies
+  }, [isLoading, isSpeaking, history, toast]);
 
   useEffect(() => {
-    if (stream && videoRef.current) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().catch(err => {
-        console.error("Error playing video:", err);
-        setError("Could not play video stream.");
-      });
+    const videoElement = videoRef.current;
+  
+    if (videoElement) {
+      if (stream) {
+        if (videoElement.srcObject !== stream) {
+          videoElement.srcObject = stream;
+          // `autoPlay` attribute and `onLoadedMetadata` handler on the <video> tag
+          // should handle playback.
+        }
+      } else {
+        // If stream becomes null, clear srcObject and stop tracks
+        if (videoElement.srcObject) {
+          const mediaStream = videoElement.srcObject as MediaStream;
+          mediaStream.getTracks().forEach(track => track.stop());
+          videoElement.srcObject = null;
+        }
+      }
     }
+  
+    // Cleanup function for this effect
     return () => {
+      // Stop tracks of the 'stream' instance this effect was dealing with.
+      // This runs when the component unmounts or 'stream' changes, before the effect runs again.
       stream?.getTracks().forEach(track => track.stop());
-      if (window.speechSynthesis) { // Cancel any speech on component unmount
+  
+      if (window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
     };
   }, [stream]);
+  
   
   useEffect(() => {
     if (typeof navigator !== "undefined" && navigator.permissions) {
@@ -234,14 +254,17 @@ export default function FingerCounterApp() {
   const handleCalculation = (operation: 'add' | 'multiply' | 'divide') => {
     const selectedItems = history.filter(item => selectedHistoryItemIds.includes(item.id));
     if (selectedItems.length < 2 && (operation === 'add' || operation === 'multiply')) {
+      toast({ variant: 'destructive', description: "Select at least 2 numbers to " + operation });
       setCalculationResult("Select at least 2 numbers to " + operation);
       return;
     }
     if (operation === 'divide' && selectedItems.length !== 2) {
+      toast({ variant: 'destructive', description: "Select exactly 2 numbers to divide." });
       setCalculationResult("Select exactly 2 numbers to divide.");
       return;
     }
     if (selectedItems.length === 0) {
+      toast({ variant: 'destructive', description: "No numbers selected." });
       setCalculationResult("No numbers selected.");
       return;
     }
@@ -258,9 +281,10 @@ export default function FingerCounterApp() {
         break;
       case 'divide':
         if (values[1] === 0) {
+          toast({ variant: 'destructive', description: "Cannot divide by zero." });
           result = "Cannot divide by zero.";
         } else {
-          result = parseFloat((values[0] / values[1]).toFixed(2)); // Format to 2 decimal places
+          result = parseFloat((values[0] / values[1]).toFixed(2)); 
         }
         break;
       default:
@@ -302,7 +326,7 @@ export default function FingerCounterApp() {
           </Alert>
         )}
         
-        {permissionStatus === 'denied' && !error && (
+        {permissionStatus === 'denied' && !error && ( // Show this only if no other error is active
            <Alert variant="destructive" className="w-full">
             <AlertTriangle className="h-5 w-5" />
             <AlertTitle>Permission Denied</AlertTitle>
@@ -319,7 +343,25 @@ export default function FingerCounterApp() {
                   className="w-full h-full object-cover transform scale-x-[-1]"
                   playsInline
                   muted
+                  autoPlay // autoPlay is crucial
                   aria-label="Camera feed"
+                  onLoadedMetadata={(e) => {
+                    const video = e.currentTarget;
+                    if (video.paused) {
+                      video.play().catch(err => {
+                        // AbortError is fine, it means something else (like srcObject change) interrupted.
+                        if (err.name !== 'AbortError') {
+                          console.warn('Failed to play video onLoadedMetadata:', err);
+                           // Avoid setting a user-facing error here if autoPlay might still recover
+                           // or if it's a transient issue.
+                        }
+                      });
+                    }
+                  }}
+                  onError={(e) => {
+                    console.error("Video element error event:", e, videoRef.current?.error);
+                    setError(`Video element error: ${videoRef.current?.error?.message || 'Unknown video error'}. Please ensure your camera is working and permissions are granted.`);
+                  }}
                 />
                 {(isLoading || isSpeaking) && videoRef.current?.srcObject && (
                    <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
@@ -405,8 +447,8 @@ export default function FingerCounterApp() {
                      <Eraser className="mr-1 h-4 w-4" /> Clear Selection
                   </Button>
                   {calculationResult !== null && (
-                    <Alert className={typeof calculationResult === 'string' && (calculationResult.toLowerCase().includes('cannot') || calculationResult.toLowerCase().includes('select')) ? 'border-destructive text-destructive' : 'border-primary'}>
-                      <AlertTitle className={typeof calculationResult === 'string' && (calculationResult.toLowerCase().includes('cannot') || calculationResult.toLowerCase().includes('select')) ? '' : 'text-primary'}>Result</AlertTitle>
+                    <Alert className={typeof calculationResult === 'string' && (calculationResult.toLowerCase().includes('cannot') || calculationResult.toLowerCase().includes('select') || calculationResult.toLowerCase().includes('invalid')) ? 'border-destructive text-destructive' : 'border-primary'}>
+                      <AlertTitle className={typeof calculationResult === 'string' && (calculationResult.toLowerCase().includes('cannot') || calculationResult.toLowerCase().includes('select')|| calculationResult.toLowerCase().includes('invalid')) ? '' : 'text-primary'}>Result</AlertTitle>
                       <AlertDescription className="font-bold text-lg">
                         {calculationResult}
                       </AlertDescription>
