@@ -7,16 +7,16 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Separator } from '@/components/ui/separator';
-import { Badge } from '@/components/ui/badge';
-import { Loader2, Camera, AlertTriangle, Hand, Plus, XIcon, Divide, Trash2, Eraser } from 'lucide-react';
+import { Badge } from '@/components/ui/badge'; // Keep Badge if used elsewhere, or remove
+import { Loader2, Camera, AlertTriangle, Hand, Plus, XIcon, Divide, Trash2, Eraser, ScanLine, Volume2 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { useToast } from '@/hooks/use-toast';
+
 
 type PermissionStatus = 'idle' | 'pending' | 'granted' | 'denied';
 
 const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
-const DETECTION_INTERVAL = 750; // milliseconds, reduced for more continuous detection
 
 interface AnimatedNumberProps {
   value: number | null;
@@ -44,6 +44,7 @@ export default function FingerCounterApp() {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [detectedFingers, setDetectedFingers] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -52,7 +53,7 @@ export default function FingerCounterApp() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const detectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const { toast } = useToast();
 
   const requestCameraPermission = async () => {
     setPermissionStatus('pending');
@@ -80,9 +81,48 @@ export default function FingerCounterApp() {
     }
   };
 
-  const captureFrameAndDetect = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended || isLoading) {
+  const speakNumber = (number: number) => {
+    if (!('speechSynthesis' in window)) {
+      setError("Speech synthesis not supported by your browser.");
+      toast({
+        variant: 'destructive',
+        title: 'Speech Synthesis Not Supported',
+        description: 'Your browser does not support text-to-speech.',
+      });
       return;
+    }
+    
+    // Cancel any ongoing speech before starting a new one
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(`Detected ${number} finger${number === 1 ? '' : 's'}`);
+    utterance.lang = 'en-US'; 
+    utterance.onstart = () => {
+      setIsSpeaking(true);
+    };
+    utterance.onend = () => {
+      setIsSpeaking(false);
+    };
+    utterance.onerror = (event) => {
+      console.error('Speech synthesis error:', event.error);
+      setError(`Could not speak the number: ${event.error}`);
+      toast({
+        variant: 'destructive',
+        title: 'Speech Error',
+        description: `Could not speak the number: ${event.error}`,
+      });
+      setIsSpeaking(false);
+    };
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const captureFrameAndDetect = useCallback(async () => {
+    if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended) {
+      setError("Video stream is not available or not playing.");
+      return;
+    }
+    if (isLoading || isSpeaking) { // Prevent new scan if already loading or speaking
+        return;
     }
 
     setIsLoading(true);
@@ -96,10 +136,6 @@ export default function FingerCounterApp() {
     const context = canvas.getContext('2d');
 
     if (context) {
-      // Flip the image horizontally before drawing to canvas if video is mirrored by CSS
-      // This ensures the AI sees the image as the user sees it (if CSS mirrors it)
-      // However, the current CSS transform mirrors the display, not the underlying stream.
-      // For detection, we need the raw, unmirrored frame.
       context.drawImage(video, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
       const photoDataUri = canvas.toDataURL('image/jpeg', 0.8);
       
@@ -114,7 +150,6 @@ export default function FingerCounterApp() {
         setDetectedFingers(result.numberOfFingers);
         setError(null); // Clear error on successful detection
 
-        // Add to history if different from the last entry or history is empty
         if (history.length === 0 || history[history.length - 1].value !== result.numberOfFingers) {
           setHistory(prevHistory => {
             const newHistoryItem: HistoryItem = {
@@ -123,21 +158,25 @@ export default function FingerCounterApp() {
               timestamp: Date.now(),
             };
             const updatedHistory = [...prevHistory, newHistoryItem];
-            // Limit history size (e.g., to 50 items)
             return updatedHistory.slice(-50);
           });
         }
+        speakNumber(result.numberOfFingers);
 
       } catch (err) {
         console.error("Error detecting fingers:", err);
         setError(err instanceof Error ? `AI detection failed: ${err.message}` : "AI detection failed due to an unknown error.");
-        // setDetectedFingers(null); // Optionally clear detected fingers on error, or keep last known
+        toast({
+          variant: 'destructive',
+          title: 'AI Detection Error',
+          description: err instanceof Error ? err.message : "An unknown error occurred during detection.",
+        });
       }
     } else {
       setError("Failed to get canvas context.");
     }
     setIsLoading(false);
-  }, [isLoading, history]);
+  }, [isLoading, isSpeaking, history, toast]); // Added isSpeaking and toast to dependencies
 
   useEffect(() => {
     if (stream && videoRef.current) {
@@ -149,30 +188,11 @@ export default function FingerCounterApp() {
     }
     return () => {
       stream?.getTracks().forEach(track => track.stop());
+      if (window.speechSynthesis) { // Cancel any speech on component unmount
+        window.speechSynthesis.cancel();
+      }
     };
   }, [stream]);
-
-  useEffect(() => {
-    const scheduleDetection = () => {
-      if (detectionTimeoutRef.current) {
-        clearTimeout(detectionTimeoutRef.current);
-      }
-      if (permissionStatus === 'granted' && stream) {
-        detectionTimeoutRef.current = setTimeout(async () => {
-          await captureFrameAndDetect();
-          scheduleDetection(); // Schedule next detection
-        }, DETECTION_INTERVAL);
-      }
-    };
-
-    scheduleDetection();
-
-    return () => {
-      if (detectionTimeoutRef.current) {
-        clearTimeout(detectionTimeoutRef.current);
-      }
-    };
-  }, [permissionStatus, stream, captureFrameAndDetect]);
   
   useEffect(() => {
     if (typeof navigator !== "undefined" && navigator.permissions) {
@@ -187,13 +207,17 @@ export default function FingerCounterApp() {
     }
   }, []);
 
+  const handleScanAndAnnounce = () => {
+    captureFrameAndDetect();
+  };
+
   const handleToggleHistoryItemSelection = (id: string) => {
     setSelectedHistoryItemIds(prevSelected =>
       prevSelected.includes(id)
         ? prevSelected.filter(itemId => itemId !== id)
         : [...prevSelected, id]
     );
-    setCalculationResult(null); // Clear previous result when selection changes
+    setCalculationResult(null);
   };
 
   const handleClearSelection = () => {
@@ -236,7 +260,7 @@ export default function FingerCounterApp() {
         if (values[1] === 0) {
           result = "Cannot divide by zero.";
         } else {
-          result = values[0] / values[1];
+          result = parseFloat((values[0] / values[1]).toFixed(2)); // Format to 2 decimal places
         }
         break;
       default:
@@ -255,7 +279,7 @@ export default function FingerCounterApp() {
           <Hand className="w-8 h-8 text-primary" /> Finger Counter AI
         </CardTitle>
         <CardDescription className="text-md">
-          Live finger detection with history and calculations.
+          Show your hand, scan, and hear the count!
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col items-center space-y-6">
@@ -288,26 +312,40 @@ export default function FingerCounterApp() {
 
         {permissionStatus === 'granted' && (
           <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-            {/* Left Column: Video and Detection */}
             <div className="flex flex-col items-center space-y-4">
               <div className="relative w-full max-w-md aspect-[4/3] bg-secondary rounded-lg overflow-hidden shadow-lg">
                 <video
                   ref={videoRef}
-                  className="w-full h-full object-cover transform scale-x-[-1]" // Mirror display
+                  className="w-full h-full object-cover transform scale-x-[-1]"
                   playsInline
                   muted
                   aria-label="Camera feed"
                 />
-                {isLoading && videoRef.current?.srcObject && (
+                {(isLoading || isSpeaking) && videoRef.current?.srcObject && (
                    <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
-                      <Loader2 className="h-12 w-12 text-white animate-spin" />
+                      {isLoading && <Loader2 className="h-12 w-12 text-white animate-spin" />}
+                      {isSpeaking && !isLoading && <Volume2 className="h-12 w-12 text-white" />}
                    </div>
                 )}
               </div>
               <AnimatedNumberDisplay value={detectedFingers} />
+              <Button
+                onClick={handleScanAndAnnounce}
+                disabled={isLoading || isSpeaking}
+                size="lg"
+                className="w-full max-w-xs mt-2"
+              >
+                {isLoading ? (
+                  <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                ) : isSpeaking ? (
+                  <Volume2 className="mr-2 h-5 w-5" />
+                ) : (
+                  <ScanLine className="mr-2 h-5 w-5" />
+                )}
+                {isLoading ? 'Scanning...' : isSpeaking ? 'Speaking...' : 'Scan and Announce'}
+              </Button>
             </div>
 
-            {/* Right Column: History and Calculations */}
             <div className="flex flex-col space-y-4 w-full">
               <Card>
                 <CardHeader>
@@ -321,7 +359,7 @@ export default function FingerCounterApp() {
                 </CardHeader>
                 <CardContent>
                   {history.length === 0 ? (
-                    <p className="text-muted-foreground text-sm">No history yet. Show your hand to the camera!</p>
+                    <p className="text-muted-foreground text-sm">No history yet. Scan your hand to get started!</p>
                   ) : (
                     <ScrollArea className="h-48 w-full pr-3">
                       <div className="space-y-2">
@@ -382,7 +420,7 @@ export default function FingerCounterApp() {
         <canvas ref={canvasRef} className="hidden" aria-hidden="true"></canvas>
       </CardContent>
       <CardFooter className="text-xs text-muted-foreground justify-center">
-        AI-powered finger counting. Calculations are performed on historical detections.
+        AI-powered finger counting. Click "Scan and Announce" to detect and hear the result.
       </CardFooter>
     </Card>
   );
