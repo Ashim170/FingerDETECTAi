@@ -1,3 +1,4 @@
+
 import type {Metadata} from 'next';
 import {Geist, Geist_Mono} from 'next/font/google';
 import './globals.css';
@@ -14,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Finger Counter',
-  description: 'An app that counts fingers using your camera and AI.',
+  title: 'AI Finger Counter & Calculator',
+  description: 'An app that counts fingers using your camera and AI, with history and calculations.',
 };
 
 export default function RootLayout({
@@ -32,3 +33,4 @@ export default function RootLayout({
     </html>
   );
 }
+
